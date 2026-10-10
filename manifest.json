@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "S21 SlotMachine",
+  "version": "1.0.0",
+  "description": "Панель автообновления данных календаря ревью без перезагрузки страницы.",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "alarms",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://platform.21-school.ru/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://platform.21-school.ru/calendar/review/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
