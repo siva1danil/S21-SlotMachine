@@ -15,6 +15,7 @@ const BOOKING_HOURS = new Set([
 ]);
 const activeCycles = new Map();
 const tabLocks = new Map();
+const panelInjections = new Map();
 
 function withTabLock(tabId, action) {
   const previous = tabLocks.get(tabId) ?? Promise.resolve();
@@ -685,6 +686,50 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.url && !isReviewUrl(change.url)) void stopRun(tabId);
 });
 
+async function ensurePanelInjected(tabId, url) {
+  if (!isReviewUrl(url)) return;
+  if (panelInjections.has(tabId)) return panelInjections.get(tabId);
+  const injection = (async () => {
+    const [probe] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Boolean(globalThis.__school21RefreshPanelInstalled)
+    });
+    if (probe?.result) {
+      await chrome.tabs.sendMessage(tabId, { type: "S21_ROUTE_CHANGED" });
+      return;
+    }
+    await chrome.scripting.insertCSS({ target: { tabId }, files: ["panel.css"] });
+    await chrome.scripting.executeScript({
+      target: { tabId }, files: ["content.js"]
+    });
+  })();
+  panelInjections.set(tabId, injection);
+  try { await injection; } finally {
+    if (panelInjections.get(tabId) === injection) panelInjections.delete(tabId);
+  }
+}
+
+function handlePlatformNavigation(details) {
+  if (details.frameId !== 0) return;
+  if (!isReviewUrl(details.url)) {
+    void stopRun(details.tabId);
+    void chrome.tabs.sendMessage(details.tabId, { type: "S21_ROUTE_CHANGED" })
+      .catch(() => {});
+    return;
+  }
+  void ensurePanelInjected(details.tabId, details.url).catch(() => {
+    // The tab may have moved to another route before injection finishes.
+  });
+}
+
+const platformNavigationFilter = {
+  url: [{ schemes: ["https"], hostEquals: "platform.21-school.ru" }]
+};
+chrome.webNavigation.onCompleted.addListener(handlePlatformNavigation,
+  platformNavigationFilter);
+chrome.webNavigation.onHistoryStateUpdated.addListener(handlePlatformNavigation,
+  platformNavigationFilter);
+
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.alarms.clear("refresh-review-calendar");
   const saved = await chrome.storage.local.get(["draft", "intervalSeconds"]);
@@ -699,17 +744,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   for (const tab of tabs) {
     if (tab.id === undefined || tab.status === "loading") continue;
     try {
-      const [probe] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => Boolean(document.getElementById("s21-refresh-panel"))
-      });
-      if (probe?.result) continue;
-      await chrome.scripting.insertCSS({
-        target: { tabId: tab.id }, files: ["panel.css"]
-      });
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id }, files: ["content.js"]
-      });
+      await ensurePanelInjected(tab.id, tab.url);
     } catch {
       // A tab may navigate while the extension is being installed.
     }

@@ -19,6 +19,9 @@ function createHarness() {
   const alarms = new Map();
   const messages = [];
   const injections = [];
+  const insertedCSS = [];
+  let historyStateListener;
+  let completedListener;
   const listener = { addListener() {} };
   const chrome = {
     storage: {
@@ -49,7 +52,15 @@ function createHarness() {
       executeScript(details) {
         return new Promise((resolve) => injections.push({ resolve, details }));
       },
-      async insertCSS() {}
+      async insertCSS(details) { insertedCSS.push(details); }
+    },
+    webNavigation: {
+      onCompleted: {
+        addListener(callback) { completedListener = callback; }
+      },
+      onHistoryStateUpdated: {
+        addListener(callback) { historyStateListener = callback; }
+      }
     },
     runtime: { onMessage: listener, onInstalled: listener }
   };
@@ -67,7 +78,9 @@ function createHarness() {
   };
   vm.runInNewContext(source, sandbox);
   return {
-    sandbox, chrome, states, alarms, messages, injections,
+    sandbox, chrome, states, alarms, messages, injections, insertedCSS,
+    navigationCompleted(details) { completedListener(details); },
+    historyStateUpdated(details) { historyStateListener(details); },
     async waitForInjection() {
       for (let attempt = 0; attempt < 100 && !injections.length; attempt++) await pause();
       assert.ok(injections.length, "the GraphQL refresh was started");
@@ -82,6 +95,55 @@ function createHarness() {
     }
   };
 }
+
+test("history navigation into a review page injects the panel once", async () => {
+  const h = createHarness();
+  const details = { tabId: 1, frameId: 0,
+    url: "https://platform.21-school.ru/calendar/review/69046" };
+  h.historyStateUpdated({ ...details, frameId: 1 });
+  h.historyStateUpdated(details);
+  h.historyStateUpdated(details);
+  await h.waitForInjection();
+  assert.equal(h.injections.length, 1);
+  assert.equal(typeof h.injections[0].details.func, "function");
+  h.finishInjection(false);
+  await h.waitForInjection();
+  assert.equal(h.insertedCSS.length, 1);
+  assert.equal(h.injections[0].details.files[0], "content.js");
+  h.finishInjection();
+  await pause();
+  h.historyStateUpdated(details);
+  await h.waitForInjection();
+  h.finishInjection(true);
+  await pause();
+  assert.equal(h.insertedCSS.length, 1);
+  assert.equal(h.injections.length, 0);
+  assert.equal(h.messages.at(-1).type, "S21_ROUTE_CHANGED");
+  h.historyStateUpdated({ ...details, url: "https://platform.21-school.ru/calendar" });
+  await pause();
+  assert.equal(h.messages.filter((message) => message.type === "S21_ROUTE_CHANGED")
+    .length, 2);
+});
+
+test("direct load and history navigation share the panel injection path", async () => {
+  const h = createHarness();
+  const details = { tabId: 1, frameId: 0,
+    url: "https://platform.21-school.ru/calendar/review/69046" };
+  h.navigationCompleted(details);
+  h.historyStateUpdated(details);
+  await h.waitForInjection();
+  assert.equal(h.injections.length, 1);
+  h.finishInjection(false);
+  await h.waitForInjection();
+  assert.equal(h.insertedCSS.length, 1);
+  assert.equal(h.injections[0].details.files[0], "content.js");
+  h.finishInjection();
+  await pause();
+  assert.equal(h.injections.length, 0);
+  assert.equal(h.insertedCSS.length, 1);
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "manifest.json")));
+  assert.equal(manifest.content_scripts, undefined);
+});
 
 test("one-shot run finishes and clears its watchdog alarm", async () => {
   const h = createHarness();

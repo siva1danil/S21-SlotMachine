@@ -388,6 +388,10 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   });
 
   chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === "S21_ROUTE_CHANGED") {
+      queuePlacement();
+      return;
+    }
     if (message?.type !== "S21_STATE") return;
     stateRevision++;
     run = message.state;
