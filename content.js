@@ -23,6 +23,7 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   let stateRevision = 0;
   let pending = false;
   let uiError = "";
+  let health = { level: "ok", message: "Проблем нет", reason: "", at: Date.now() };
   let cycleKey = "";
   let lastProgress = 0;
   let tickTimer = null;
@@ -74,12 +75,6 @@ if (!globalThis.__school21RefreshPanelInstalled) {
           <label class="s21-booking-enable">
             <input type="checkbox" data-s21="booking-enabled"> Включить
           </label>
-          <label class="s21-booking-type">Тип
-            <select data-s21="booking-type">
-              <option value="online">Онлайн</option>
-              <option value="offline">Офлайн</option>
-            </select>
-          </label>
           <label class="s21-booking-horizon">Слоты в течение
             <select data-s21="booking-horizon"
               title="Проверяются слоты выбранной недели">
@@ -96,18 +91,39 @@ if (!globalThis.__school21RefreshPanelInstalled) {
                 ${Array.from({ length: 24 }, (_, hour) =>
                   `<option value="${hour}">${String(hour).padStart(2, "0")}:00</option>`).join("")}
               </select>
-              <span aria-hidden="true">–</span>
+              <span aria-hidden="true">по</span>
               <select data-s21="booking-end-hour" aria-label="Конец промежутка">
                 ${Array.from({ length: 25 }, (_, hour) =>
                   `<option value="${hour}">${String(hour).padStart(2, "0")}:00</option>`).join("")}
               </select>
             </span>
           </div>
-          <span class="s21-booking-status" data-s21="booking-status" aria-live="polite"></span>
+          <label class="s21-booking-type">Тип
+            <select data-s21="booking-type">
+              <option value="online">Онлайн</option>
+              <option value="offline">Офлайн</option>
+            </select>
+          </label>
         </div>
       </div>
       <div class="s21-footer">
         <div class="s21-actions">
+          <span class="s21-health" data-s21="health" aria-live="polite" hidden>
+            <svg class="s21-health-check" viewBox="0 0 20 20" width="17" height="17"
+              fill="none" aria-hidden="true">
+              <path d="m4 10 4 4 8-8" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <svg class="s21-health-warning" viewBox="0 0 20 20" width="17" height="17"
+              fill="none" aria-hidden="true">
+              <path d="M10 3 18 17H2L10 3Z" stroke="currentColor" stroke-width="1.7"
+                stroke-linejoin="round"/>
+              <path d="M10 8v4m0 2v.1" stroke="currentColor" stroke-width="1.7"
+                stroke-linecap="round"/>
+            </svg>
+            <span data-s21="health-label"></span>
+            <time data-s21="health-time"></time>
+          </span>
           <span class="s21-status" data-s21="status" aria-live="off">Остановлено</span>
           <button type="button" class="s21-once" data-s21="once"
             aria-label="Обновить один раз" title="Обновить один раз">
@@ -141,7 +157,9 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   const bookingHorizon = panel.querySelector('[data-s21="booking-horizon"]');
   const bookingStartHour = panel.querySelector('[data-s21="booking-start-hour"]');
   const bookingEndHour = panel.querySelector('[data-s21="booking-end-hour"]');
-  const bookingStatus = panel.querySelector('[data-s21="booking-status"]');
+  const healthIndicator = panel.querySelector('[data-s21="health"]');
+  const healthLabel = panel.querySelector('[data-s21="health-label"]');
+  const healthTime = panel.querySelector('[data-s21="health-time"]');
   const startButton = panel.querySelector('[data-s21="start"]');
   const onceButton = panel.querySelector('[data-s21="once"]');
   const stopButton = panel.querySelector('[data-s21="stop"]');
@@ -239,7 +257,52 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     panel.classList.toggle("s21-dark", luminance < 130);
   }
 
+  function updateHealth(snapshot) {
+    if (!snapshot) return;
+    const result = snapshot.lastResult;
+    const booking = snapshot.config?.autoBooking?.enabled ? snapshot.lastBooking : null;
+    const warnings = [];
+    if (Number.isFinite(result?.at)) {
+      const message = result.status === "timeout" ? "Превышено время загрузки"
+        : result.status !== "ok" || result.failed || result.missing
+          ? "Ошибка обновления календаря"
+          : snapshot.config.clearMode !== "keep" && !result.cacheCleared
+            ? "Не удалось очистить старые данные" : null;
+      if (message) warnings.push({ message, reason: message, at: result.at });
+    }
+    const bookingWarnings = {
+      failed: "Ошибка записи",
+      insufficient_prp: "Недостаточно PRP",
+      prp_unavailable: "Не удалось проверить PRP",
+      missing_context: "Данные для записи недоступны",
+      unavailable: "Не удалось проверить запись"
+    };
+    if (Number.isFinite(booking?.at) && bookingWarnings[booking.status]) {
+      warnings.push({ message: bookingWarnings[booking.status],
+        reason: booking.reason ?? "", at: booking.at });
+    }
+    if (!warnings.length) return;
+    const latest = warnings.reduce((a, b) => a.at >= b.at ? a : b);
+    if (health.level !== "warning" || latest.at > health.at) {
+      health = { level: "warning", ...latest };
+    }
+  }
+
+  function renderHealth() {
+    healthIndicator.hidden = !health;
+    if (!health) return;
+    healthIndicator.dataset.level = health.level;
+    healthIndicator.title = health.reason || health.message;
+    healthLabel.textContent = health.message;
+    const date = new Date(health.at);
+    healthTime.dateTime = date.toISOString();
+    healthTime.textContent = date.toLocaleTimeString("ru-RU", {
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false
+    });
+  }
+
   function renderStatus() {
+    renderHealth();
     let mode = "stopped";
     if (uiError) {
       statusLabel.textContent = uiError;
@@ -270,30 +333,6 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     } else {
       statusLabel.title = "";
     }
-    const config = run?.config ?? draft;
-    if (!config.autoBooking.enabled) {
-      if (bookingStatus.textContent) bookingStatus.textContent = "";
-      bookingStatus.title = "";
-      return;
-    }
-    const last = run?.lastBooking;
-    const descriptions = {
-      booked: "Записан на слот — обновляю календарь",
-      failed: "Не удалось записаться — проверяю другие слоты",
-      insufficient_prp: "Недостаточно PRP для записи",
-      prp_unavailable: "Не удалось проверить PRP",
-      no_slots: "Подходящих слотов пока нет",
-      missing_context: "Данные для записи пока недоступны",
-      unavailable: "Не удалось проверить запись"
-    };
-    const bookingMessage = !run ? "Запусти обновление"
-      : last?.status === "complete"
-        ? `Лимит заполнен (${last.current}/${last.target})`
-        : descriptions[last?.status] ?? "Ожидаю свободные слоты";
-    if (bookingStatus.textContent !== bookingMessage) {
-      bookingStatus.textContent = bookingMessage;
-    }
-    bookingStatus.title = last?.reason ?? "";
   }
 
   function renderProgress() {
@@ -432,6 +471,7 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     if (message?.type !== "S21_STATE") return;
     stateRevision++;
     run = message.state;
+    updateHealth(message.final ?? run);
     uiError = "";
     render();
   });
@@ -462,6 +502,7 @@ if (!globalThis.__school21RefreshPanelInstalled) {
       const response = await chrome.runtime.sendMessage({ type: "S21_GET_STATE" });
       if (response?.ok && stateRevision === revisionBeforeRequest) {
         run = response.state;
+        updateHealth(run);
       }
     } catch {
       uiError = "Не удалось связаться с расширением";

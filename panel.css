@@ -7,6 +7,7 @@
   --s21-track: #dce4eb;
   --s21-green: #138e6a;
   --s21-blue: #138cb9;
+  --s21-warning: #a86510;
   --s21-error: #b74343;
   position: relative;
   z-index: 21;
@@ -33,6 +34,7 @@
   --s21-track: #415066;
   --s21-green: #3fd9a0;
   --s21-blue: #28b9e8;
+  --s21-warning: #ffd078;
   --s21-error: #ffaaa8;
 }
 
@@ -69,9 +71,7 @@
   outline-offset: 3px;
 }
 #s21-refresh-panel .s21-section + .s21-section {
-  margin-top: 21px;
-  padding-top: 21px;
-  border-top: 1px solid var(--s21-border);
+  margin-top: 28px;
 }
 #s21-refresh-panel .s21-section h2 {
   margin: 0 0 15px;
@@ -105,15 +105,18 @@
   align-items: center;
   gap: 10px;
 }
-#s21-refresh-panel .s21-booking-controls { flex-wrap: wrap; gap: 18px; }
-#s21-refresh-panel .s21-booking-enable { cursor: pointer; }
+#s21-refresh-panel .s21-booking-controls {
+  flex-wrap: wrap;
+  column-gap: 18px;
+  row-gap: 15px;
+}
+#s21-refresh-panel .s21-booking-enable { flex-basis: 100%; cursor: pointer; }
 #s21-refresh-panel .s21-booking-type,
 #s21-refresh-panel .s21-booking-horizon,
 #s21-refresh-panel .s21-booking-window { color: var(--s21-muted); }
 #s21-refresh-panel .s21-time-range {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
   height: 36px;
   padding: 0 4px;
   border-radius: 6px;
@@ -121,17 +124,13 @@
   background: var(--s21-field);
   white-space: nowrap;
 }
+#s21-refresh-panel .s21-time-range > span { padding-inline: 8px; }
 #s21-refresh-panel .s21-time-range select {
   min-width: 74px;
   height: 100%;
   padding: 5px 2px;
   background: transparent;
   font-variant-numeric: tabular-nums;
-}
-#s21-refresh-panel .s21-booking-status {
-  margin-left: auto;
-  color: var(--s21-muted);
-  text-align: right;
 }
 #s21-refresh-panel input[type="checkbox"] {
   width: 16px;
@@ -162,6 +161,10 @@
   font: inherit;
   cursor: pointer;
 }
+#s21-refresh-panel select option {
+  color: var(--s21-text);
+  background: var(--s21-field);
+}
 #s21-refresh-panel.s21-dark select { color-scheme: dark; }
 #s21-refresh-panel button {
   min-width: 69px;
@@ -179,7 +182,24 @@
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 10px;
-  margin-left: auto;
+  width: 100%;
+}
+#s21-refresh-panel .s21-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  color: var(--s21-green);
+  white-space: nowrap;
+}
+#s21-refresh-panel .s21-health[hidden] { display: none; }
+#s21-refresh-panel .s21-health[data-level="warning"] { color: var(--s21-warning); }
+#s21-refresh-panel .s21-health[data-level="warning"] .s21-health-check,
+#s21-refresh-panel .s21-health[data-level="ok"] .s21-health-warning { display: none; }
+#s21-refresh-panel .s21-health time {
+  margin-left: 2px;
+  color: var(--s21-muted);
+  font-variant-numeric: tabular-nums;
 }
 #s21-refresh-panel .s21-start {
   background: var(--s21-green);

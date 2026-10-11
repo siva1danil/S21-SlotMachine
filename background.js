@@ -90,24 +90,34 @@ async function putState(tabId, state) {
   await chrome.storage.session.set({ [stateKey(tabId)]: state });
 }
 
-async function sendState(tabId, state) {
+async function sendState(tabId, state, final) {
   try {
-    await chrome.tabs.sendMessage(tabId, { type: "S21_STATE", state });
+    await chrome.tabs.sendMessage(tabId, {
+      type: "S21_STATE", state, ...(final ? { final } : {})
+    });
   } catch {
     // The tab may be navigating or already closed.
   }
 }
 
-async function stopRunUnlocked(tabId, expectedRunId) {
-  if (expectedRunId && (await getState(tabId))?.runId !== expectedRunId) return;
+async function stopRunUnlocked(tabId, expectedRunId, finalResult) {
+  const current = await getState(tabId);
+  if (expectedRunId && current?.runId !== expectedRunId) return;
   activeCycles.delete(tabId);
   await chrome.alarms.clear(alarmName(tabId));
   await chrome.storage.session.remove(stateKey(tabId));
-  await sendState(tabId, null);
+  await sendState(tabId, null, current && {
+    runId: current.runId,
+    config: current.config,
+    lastBooking: current.lastBooking,
+    lastResult: finalResult
+      ? { ...finalResult, at: Date.now() }
+      : current.lastResult
+  });
 }
 
-function stopRun(tabId, expectedRunId) {
-  return withTabLock(tabId, () => stopRunUnlocked(tabId, expectedRunId));
+function stopRun(tabId, expectedRunId, finalResult) {
+  return withTabLock(tabId, () => stopRunUnlocked(tabId, expectedRunId, finalResult));
 }
 
 async function startRun(tabId, rawConfig, oneShot = false) {
@@ -317,24 +327,38 @@ async function bookOneInPage(horizonHours, bookingType, excludedKeys, prpChecked
   const quota = { current: studentCurrent, target: studentTarget };
   const needStudent = studentCurrent < studentTarget;
   if (!needStudent) return { status: "complete", ...quota };
+  const durationMinutes = review.checkDuration;
+  if (!Number.isFinite(durationMinutes) || durationMinutes <= 0) {
+    return { status: "missing_context", reason: "Неизвестна длительность проверки",
+      ...quota };
+  }
 
   const now = Date.now();
   const until = now + horizonHours * 3_600_000;
+  const durationMs = durationMinutes * 60_000;
+  // A full-day window does not exclude reviews that cross midnight.
+  const allDay = startHour === endHour || (startHour === 0 && endHour === 24);
   const excluded = new Set(excludedKeys);
   const candidates = review.timeSlots.flatMap((slot) => {
     if (slot?.staffSlot !== false) return [];
     if (!Array.isArray(slot?.validStartTimes)) return [];
     return slot.validStartTimes.flatMap((value) => {
       const at = Date.parse(value);
-      if (!Number.isFinite(at) || at <= now || at > until) return [];
+      if (!Number.isFinite(at) || at <= now || at + durationMs > until) return [];
       const localStart = new Date(at);
-      const minuteOfDay = localStart.getHours() * 60 + localStart.getMinutes();
-      const fromMinute = startHour * 60;
-      const toMinute = endHour * 60;
-      const inWindow = fromMinute === toMinute || (fromMinute < toMinute
-        ? minuteOfDay >= fromMinute && minuteOfDay < toMinute
-        : minuteOfDay >= fromMinute || minuteOfDay < toMinute);
-      if (!inWindow) return [];
+      if (!allDay) {
+        const windowStart = new Date(localStart);
+        const windowEnd = new Date(localStart);
+        windowStart.setHours(startHour, 0, 0, 0);
+        windowEnd.setHours(endHour, 0, 0, 0);
+        if (startHour > endHour) {
+          if (at < windowEnd.getTime()) windowStart.setDate(windowStart.getDate() - 1);
+          else windowEnd.setDate(windowEnd.getDate() + 1);
+        }
+        if (at < windowStart.getTime() || at + durationMs > windowEnd.getTime()) {
+          return [];
+        }
+      }
       const startTime = localStart.toISOString();
       const key = `student:${startTime}`;
       return excluded.has(key) ? [] : [{ key, startTime, at }];
@@ -604,7 +628,7 @@ async function runCycle(tabId, runId) {
       const current = await getState(tabId);
       if (!isCurrentCycle(current, initial)) return;
       if (current.oneShot) {
-        await stopRunUnlocked(tabId, initial.runId);
+        await stopRunUnlocked(tabId, initial.runId, result);
         return;
       }
 
@@ -622,7 +646,11 @@ async function runCycle(tabId, runId) {
       await sendState(tabId, next);
     });
   } catch {
-    await stopRun(tabId, initial.runId);
+    const requested = Object.values(initial.config.selected).filter(Boolean).length;
+    await stopRun(tabId, initial.runId, {
+      status: "unavailable", requested, completed: 0,
+      missing: requested, failed: 0, cacheCleared: false
+    });
   } finally {
     if (activeCycles.get(tabId) === token) activeCycles.delete(tabId);
   }
@@ -639,7 +667,11 @@ async function handleAlarm(tabId) {
     }
     activeCycles.delete(tabId);
     if (state.oneShot) {
-      await stopRunUnlocked(tabId, state.runId);
+      const requested = Object.values(state.config.selected).filter(Boolean).length;
+      await stopRunUnlocked(tabId, state.runId, {
+        status: "timeout", requested, completed: 0,
+        missing: 0, failed: requested, cacheCleared: false
+      });
       return true;
     }
     const now = Date.now();

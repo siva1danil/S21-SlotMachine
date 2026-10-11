@@ -157,6 +157,8 @@ test("one-shot run finishes and clears its watchdog alarm", async () => {
   assert.equal(h.states.has(stateKey), false);
   assert.equal(h.alarms.size, 0);
   assert.equal(h.messages.at(-1).state, null);
+  assert.equal(h.messages.at(-1).final.lastResult.status, "ok");
+  assert.ok(Number.isFinite(h.messages.at(-1).final.lastResult.at));
 });
 
 test("a stopped run cannot clear a newer run when its request finishes", async () => {
@@ -208,6 +210,7 @@ test("a stale one-shot loading state recovers after its watchdog fires", async (
   await h.sandbox.handleAlarm(1);
   assert.equal(h.states.has(stateKey), false);
   assert.equal(h.alarms.size, 0);
+  assert.equal(h.messages.at(-1).final.lastResult.status, "timeout");
   h.finishInjection();
   await pause();
   assert.equal(h.states.has(stateKey), false);
@@ -382,6 +385,7 @@ test("booking uses the site's mutation for the earliest valid start time", async
   const staffSooner = new Date(Date.now() + 15 * 60_000).toISOString();
   const sooner = new Date(Date.now() + 30 * 60_000).toISOString();
   const later = new Date(Date.now() + 90 * 60_000).toISOString();
+  let durationMinutes = 30;
   let mutation;
   const queries = [{
     queryName: "calendarGetModule",
@@ -394,6 +398,7 @@ test("booking uses the site's mutation for the earliest valid start time", async
     variables: { taskId: "task-1" },
     getCurrentResult: () => ({ data: { student: {
       getNameLessStudentTimeslotsForReview: {
+        checkDuration: durationMinutes,
         projectReviewsInfo: {
           relevantReviewByStudentsCount: 2, reviewByStudentCount: 3,
           relevantReviewByInspectionStaffCount: 0, reviewByInspectionStaffCount: 1
@@ -434,6 +439,14 @@ test("booking uses the site's mutation for the earliest valid start time", async
   assert.equal(mutation.variables.isOnline, false);
   assert.equal(mutation.variables.wasStaffSlotChosen, false);
   assert.equal(mutation.variables.startTime, sooner);
+  durationMinutes = 60;
+  assert.equal((await h.sandbox.bookOneInPage(1, "online", [])).status,
+    "no_slots");
+  assert.equal((await h.sandbox.bookOneInPage(2, "online", [])).startTime,
+    sooner);
+  durationMinutes = null;
+  assert.equal((await h.sandbox.bookOneInPage(2, "online", [])).status,
+    "missing_context");
   mutation = null;
   h.sandbox.window.location.pathname = "/calendar/review/another-project";
   assert.equal((await h.sandbox.bookOneInPage(2, "online", [])).status,
@@ -441,7 +454,7 @@ test("booking uses the site's mutation for the earliest valid start time", async
   assert.equal(mutation, null);
 });
 
-test("booking filters slot starts by local hour, including an overnight range", async () => {
+test("booking requires the whole slot to fit the local-hour window", async () => {
   const h = createHarness();
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
@@ -452,7 +465,8 @@ test("booking filters slot starts by local hour, including an overnight range", 
     return value.toISOString();
   };
   const morning = localStart(0, 9);
-  const afternoon = localStart(0, 17, 30);
+  const midday = localStart(0, 12, 30);
+  const afternoon = localStart(0, 17);
   const endBoundary = localStart(0, 18);
   const late = localStart(0, 23);
   const early = localStart(1, 2);
@@ -469,11 +483,12 @@ test("booking filters slot starts by local hour, including an overnight range", 
           variables: { taskId: "task-1" },
           getCurrentResult: () => ({ data: { student: {
             getNameLessStudentTimeslotsForReview: {
+              checkDuration: 60,
               projectReviewsInfo: {
                 relevantReviewByStudentsCount: 0, reviewByStudentCount: 1
               },
               timeSlots: [{ staffSlot: false,
-                validStartTimes: [morning, afternoon, endBoundary, late, early] }]
+                validStartTimes: [morning, midday, afternoon, endBoundary, late, early] }]
             }
           } } }) }]
       ]),
@@ -483,7 +498,11 @@ test("booking filters slot starts by local hour, including an overnight range", 
       }
     }
   };
-  assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 10, 18))
+  assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 10, 13))
+    .status, "no_slots");
+  assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 10, 14))
+    .startTime, midday);
+  assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 17, 18))
     .startTime, afternoon);
   assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 22, 6))
     .startTime, late);
@@ -491,7 +510,7 @@ test("booking filters slot starts by local hour, including an overnight range", 
     false, 22, 6)).startTime, early);
   assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 0, 24))
     .startTime, morning);
-  assert.equal(mutations, 4);
+  assert.equal(mutations, 5);
 });
 
 test("booking stops when the required review count is reached", async () => {
@@ -509,6 +528,7 @@ test("booking stops when the required review count is reached", async () => {
           variables: { taskId: "task-1" },
           getCurrentResult: () => ({ data: { student: {
             getNameLessStudentTimeslotsForReview: {
+              checkDuration: 30,
               projectReviewsInfo: {
                 relevantReviewByStudentsCount: 3, reviewByStudentCount: 3,
                 relevantReviewByInspectionStaffCount: 0, reviewByInspectionStaffCount: 1
@@ -545,6 +565,7 @@ test("booking checks PRP for the student and teammates before mutation", async (
     variables: { taskId: "task-1" },
     getCurrentResult: () => ({ data: { student: {
       getNameLessStudentTimeslotsForReview: {
+        checkDuration: 30,
         projectReviewsInfo: {
           relevantReviewByStudentsCount: 0, reviewByStudentCount: 1
         },
