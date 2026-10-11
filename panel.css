@@ -24,8 +24,6 @@
   background: var(--s21-card);
 }
 
-#s21-refresh-panel .s21-card + .s21-card { margin-top: 12px; }
-
 #s21-refresh-panel.s21-dark {
   --s21-card: #2c394b;
   --s21-text: #f2f5fa;
@@ -47,18 +45,50 @@
   flex-wrap: wrap;
 }
 #s21-refresh-panel .s21-panel-head {
-  margin-bottom: 17px;
+  margin-bottom: 23px;
 }
 #s21-refresh-panel .s21-panel-head strong {
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 18px;
+  font-weight: 700;
+}
+#s21-refresh-panel .s21-github {
+  margin-left: auto;
+  color: var(--s21-text);
+  font: 500 12px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  opacity: .62;
+  text-decoration: none;
+  transition: opacity .15s ease;
+}
+#s21-refresh-panel .s21-github:hover,
+#s21-refresh-panel .s21-github:focus-visible {
+  opacity: 1;
+  text-decoration: underline;
+}
+#s21-refresh-panel .s21-github:focus-visible {
+  outline: 2px solid var(--s21-blue);
+  outline-offset: 3px;
+}
+#s21-refresh-panel .s21-section + .s21-section {
+  margin-top: 21px;
+  padding-top: 21px;
+  border-top: 1px solid var(--s21-border);
+}
+#s21-refresh-panel .s21-section h2 {
+  margin: 0 0 15px;
+  color: var(--s21-text);
+  font: 600 16px/1.4 Roboto, Arial, sans-serif;
+}
+#s21-refresh-panel .s21-footer {
+  margin-top: 21px;
+  padding-top: 17px;
+  border-top: 1px solid var(--s21-border);
 }
 #s21-refresh-panel .s21-options {
   display: flex;
   flex-wrap: wrap;
   column-gap: 28px;
   row-gap: 10px;
-  margin-bottom: 19px;
+  margin-bottom: 15px;
 }
 #s21-refresh-panel .s21-options label {
   display: inline-flex;
