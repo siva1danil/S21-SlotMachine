@@ -14,12 +14,17 @@
   width: calc(100% - 48px);
   max-width: 1200px;
   margin: 12px auto 16px;
-  padding: 22px 28px 18px;
-  border-radius: 8px;
-  background: var(--s21-card);
   color: var(--s21-text);
   font: 14px/1.45 Roboto, Arial, sans-serif;
 }
+
+#s21-refresh-panel .s21-card {
+  padding: 22px 28px 18px;
+  border-radius: 8px;
+  background: var(--s21-card);
+}
+
+#s21-refresh-panel .s21-card + .s21-card { margin-top: 12px; }
 
 #s21-refresh-panel.s21-dark {
   --s21-card: #2c394b;
@@ -60,6 +65,23 @@
   align-items: center;
   gap: 9px;
   cursor: pointer;
+}
+#s21-refresh-panel .s21-booking-controls,
+#s21-refresh-panel .s21-booking-enable,
+#s21-refresh-panel .s21-booking-type,
+#s21-refresh-panel .s21-booking-horizon {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#s21-refresh-panel .s21-booking-controls { flex-wrap: wrap; gap: 18px; }
+#s21-refresh-panel .s21-booking-enable { cursor: pointer; }
+#s21-refresh-panel .s21-booking-type,
+#s21-refresh-panel .s21-booking-horizon { color: var(--s21-muted); }
+#s21-refresh-panel .s21-booking-status {
+  margin-left: auto;
+  color: var(--s21-muted);
+  text-align: right;
 }
 #s21-refresh-panel input[type="checkbox"] {
   width: 16px;
@@ -177,6 +199,8 @@
 @media (max-width: 700px) {
   #s21-refresh-panel {
     width: calc(100% - 24px);
+  }
+  #s21-refresh-panel .s21-card {
     padding: 18px 16px 16px;
   }
   #s21-refresh-panel .s21-options { display: grid; gap: 10px; }

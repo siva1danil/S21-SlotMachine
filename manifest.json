@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "S21 SlotMachine",
-  "version": "1.0.0",
-  "description": "Панель автообновления данных календаря ревью без перезагрузки страницы.",
+  "version": "1.1.0",
+  "description": "Автообновление календаря и запись на слоты ревью Школы 21.",
   "minimum_chrome_version": "120",
   "permissions": [
     "alarms",

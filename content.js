@@ -4,11 +4,16 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   const DEFAULT_CONFIG = {
     intervalSeconds: 60,
     clearMode: "keep",
-    selected: { own: true, registered: true, freeAndCount: true }
+    selected: { own: true, registered: true, freeAndCount: true },
+    autoBooking: { enabled: false, horizonHours: 24, type: "online" }
   };
   const INTERVALS = new Set([
     ...Array.from({ length: 15 }, (_, index) => index + 1),
     30, 60, 120, 180, 240, 300, 600, 1800
+  ]);
+  const BOOKING_HOURS = new Set([
+    ...Array.from({ length: 24 }, (_, index) => index + 1),
+    ...Array.from({ length: 6 }, (_, index) => (index + 2) * 24)
   ]);
   const PANEL_ID = "s21-refresh-panel";
   let draft = DEFAULT_CONFIG;
@@ -21,60 +26,87 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   let tickTimer = null;
   let tickKey = "";
 
-  const panel = document.createElement("section");
+  const panel = document.createElement("div");
   panel.id = PANEL_ID;
-  panel.setAttribute("aria-label", "Автообновление календаря");
   panel.innerHTML = `
-    <div class="s21-panel-head">
-      <strong>Автообновление календаря</strong>
-    </div>
-    <div class="s21-options" role="group" aria-label="Что обновлять">
-      <label><input type="checkbox" data-s21-option="own"> Мои проверки</label>
-      <label><input type="checkbox" data-s21-option="registered"> Проверки, на которые я записан</label>
-      <label><input type="checkbox" data-s21-option="freeAndCount"> Свободные слоты и счётчик</label>
-    </div>
-    <div class="s21-controls">
-      <label class="s21-interval-label">Интервал
-        <select data-s21="interval">
-          ${Array.from({ length: 15 }, (_, index) =>
-            `<option value="${index + 1}">${index + 1} сек</option>`).join("")}
-          <option value="30">30 сек</option>
-          <option value="60">1 мин</option>
-          <option value="120">2 мин</option>
-          <option value="180">3 мин</option>
-          <option value="240">4 мин</option>
-          <option value="300">5 мин</option>
-          <option value="600">10 мин</option>
-          <option value="1800">30 мин</option>
-        </select>
-      </label>
-      <label class="s21-cache-label">Старые данные
-        <select data-s21="cache-mode">
-          <option value="keep">Оставлять</option>
-          <option value="selected">Очищать</option>
-          <option value="all">Очищать все</option>
-        </select>
-      </label>
-      <div class="s21-actions">
-        <span class="s21-status" data-s21="status" aria-live="off">Остановлено</span>
-        <button type="button" class="s21-once" data-s21="once"
-          aria-label="Обновить один раз" title="Обновить один раз">
-          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" aria-hidden="true">
-            <path d="M20 11a8 8 0 1 0-2.3 6.7M20 4v7h-7"
-              stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
-              stroke-linejoin="round"/>
-          </svg>
-        </button>
-        <button type="button" class="s21-stop" data-s21="stop"
-          title="Остановить обновление">Стоп</button>
-        <button type="button" class="s21-start" data-s21="start"
-          title="Запустить автообновление">Старт</button>
+    <section class="s21-card" aria-label="Автообновление календаря">
+      <div class="s21-panel-head">
+        <strong>Автообновление календаря</strong>
       </div>
-    </div>
-    <div class="s21-progress" data-s21="progress" role="progressbar"
-      aria-label="Ожидание обновления" aria-valuemin="0" aria-valuemax="100" hidden>
-      <div class="s21-progress-fill" data-s21="fill"></div>
-    </div>
+      <div class="s21-options" role="group" aria-label="Что обновлять">
+        <label><input type="checkbox" data-s21-option="own"> Мои проверки</label>
+        <label><input type="checkbox" data-s21-option="registered"> Проверки, на которые я записан</label>
+        <label><input type="checkbox" data-s21-option="freeAndCount"> Свободные слоты и счётчик</label>
+      </div>
+      <div class="s21-controls">
+        <label class="s21-interval-label">Интервал
+          <select data-s21="interval">
+            ${Array.from({ length: 15 }, (_, index) =>
+              `<option value="${index + 1}">${index + 1} сек</option>`).join("")}
+            <option value="30">30 сек</option>
+            <option value="60">1 мин</option>
+            <option value="120">2 мин</option>
+            <option value="180">3 мин</option>
+            <option value="240">4 мин</option>
+            <option value="300">5 мин</option>
+            <option value="600">10 мин</option>
+            <option value="1800">30 мин</option>
+          </select>
+        </label>
+        <label class="s21-cache-label">Старые данные
+          <select data-s21="cache-mode">
+            <option value="keep">Оставлять</option>
+            <option value="selected">Очищать</option>
+            <option value="all">Очищать все</option>
+          </select>
+        </label>
+        <div class="s21-actions">
+          <span class="s21-status" data-s21="status" aria-live="off">Остановлено</span>
+          <button type="button" class="s21-once" data-s21="once"
+            aria-label="Обновить один раз" title="Обновить один раз">
+            <svg viewBox="0 0 24 24" width="19" height="19" fill="none" aria-hidden="true">
+              <path d="M20 11a8 8 0 1 0-2.3 6.7M20 4v7h-7"
+                stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+                stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button type="button" class="s21-stop" data-s21="stop"
+            title="Остановить обновление">Стоп</button>
+          <button type="button" class="s21-start" data-s21="start"
+            title="Запустить автообновление">Старт</button>
+        </div>
+      </div>
+      <div class="s21-progress" data-s21="progress" role="progressbar"
+        aria-label="Ожидание обновления" aria-valuemin="0" aria-valuemax="100" hidden>
+        <div class="s21-progress-fill" data-s21="fill"></div>
+      </div>
+    </section>
+    <section class="s21-card" aria-label="Автоматическая регистрация">
+      <div class="s21-panel-head">
+        <strong>Автоматическая регистрация</strong>
+      </div>
+      <div class="s21-booking-controls">
+        <label class="s21-booking-enable">
+          <input type="checkbox" data-s21="booking-enabled"> Включить
+        </label>
+        <label class="s21-booking-type">Тип
+          <select data-s21="booking-type">
+            <option value="online">Онлайн</option>
+            <option value="offline">Офлайн</option>
+          </select>
+        </label>
+        <label class="s21-booking-horizon">Слоты в течение
+          <select data-s21="booking-horizon"
+            title="Проверяются слоты выбранной недели">
+            ${Array.from({ length: 24 }, (_, index) =>
+              `<option value="${index + 1}">${index + 1} ч</option>`).join("")}
+            ${Array.from({ length: 6 }, (_, index) =>
+              `<option value="${(index + 2) * 24}">${index + 2} сут</option>`).join("")}
+          </select>
+        </label>
+        <span class="s21-booking-status" data-s21="booking-status" aria-live="polite"></span>
+      </div>
+    </section>
   `;
 
   const options = Object.fromEntries(
@@ -83,6 +115,10 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   );
   const interval = panel.querySelector('[data-s21="interval"]');
   const cacheMode = panel.querySelector('[data-s21="cache-mode"]');
+  const bookingEnabled = panel.querySelector('[data-s21="booking-enabled"]');
+  const bookingType = panel.querySelector('[data-s21="booking-type"]');
+  const bookingHorizon = panel.querySelector('[data-s21="booking-horizon"]');
+  const bookingStatus = panel.querySelector('[data-s21="booking-status"]');
   const startButton = panel.querySelector('[data-s21="start"]');
   const onceButton = panel.querySelector('[data-s21="once"]');
   const stopButton = panel.querySelector('[data-s21="stop"]');
@@ -92,6 +128,7 @@ if (!globalThis.__school21RefreshPanelInstalled) {
 
   function normalizeConfig(value) {
     const selected = value?.selected ?? DEFAULT_CONFIG.selected;
+    const freeAndCount = selected.freeAndCount === true;
     const clearMode = ["keep", "selected", "all"].includes(value?.clearMode)
       ? value.clearMode
       : value?.clearBeforeRefresh === true ? "selected" : "keep";
@@ -103,7 +140,13 @@ if (!globalThis.__school21RefreshPanelInstalled) {
       selected: {
         own: selected.own === true,
         registered: selected.registered === true,
-        freeAndCount: selected.freeAndCount === true
+        freeAndCount
+      },
+      autoBooking: {
+        enabled: freeAndCount && value?.autoBooking?.enabled === true,
+        type: value?.autoBooking?.type === "offline" ? "offline" : "online",
+        horizonHours: BOOKING_HOURS.has(value?.autoBooking?.horizonHours)
+          ? value.autoBooking.horizonHours : 24
       }
     };
   }
@@ -112,6 +155,11 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     return {
       intervalSeconds: Number(interval.value),
       clearMode: cacheMode.value,
+      autoBooking: {
+        enabled: bookingEnabled.checked,
+        type: bookingType.value,
+        horizonHours: Number(bookingHorizon.value)
+      },
       selected: Object.fromEntries(
         Object.entries(options).map(([key, input]) => [key, input.checked])
       )
@@ -121,6 +169,9 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   function showConfig(config) {
     interval.value = String(config.intervalSeconds);
     cacheMode.value = config.clearMode;
+    bookingEnabled.checked = config.autoBooking.enabled;
+    bookingType.value = config.autoBooking.type;
+    bookingHorizon.value = String(config.autoBooking.horizonHours);
     for (const [key, input] of Object.entries(options)) {
       input.checked = config.selected[key];
     }
@@ -186,6 +237,30 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     } else {
       statusLabel.title = "";
     }
+    const config = run?.config ?? draft;
+    if (!config.autoBooking.enabled) {
+      if (bookingStatus.textContent) bookingStatus.textContent = "";
+      bookingStatus.title = "";
+      return;
+    }
+    const last = run?.lastBooking;
+    const descriptions = {
+      booked: "Записан на слот — обновляю календарь",
+      failed: "Не удалось записаться — проверяю другие слоты",
+      insufficient_prp: "Недостаточно PRP для записи",
+      prp_unavailable: "Не удалось проверить PRP",
+      no_slots: "Подходящих слотов пока нет",
+      missing_context: "Данные для записи пока недоступны",
+      unavailable: "Не удалось проверить запись"
+    };
+    const bookingMessage = !run ? "Запусти обновление"
+      : last?.status === "complete"
+        ? `Лимит заполнен (${last.current}/${last.target})`
+        : descriptions[last?.status] ?? "Ожидаю свободные слоты";
+    if (bookingStatus.textContent !== bookingMessage) {
+      bookingStatus.textContent = bookingMessage;
+    }
+    bookingStatus.title = last?.reason ?? "";
   }
 
   function renderProgress() {
@@ -245,6 +320,10 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     for (const input of Object.values(options)) input.disabled = running || pending;
     interval.disabled = running || pending;
     cacheMode.disabled = running || pending;
+    bookingEnabled.disabled = running || pending ||
+      !(running ? run.config : draft).selected.freeAndCount;
+    bookingType.disabled = running || pending || !bookingEnabled.checked;
+    bookingHorizon.disabled = running || pending || !bookingEnabled.checked;
     startButton.disabled = running || pending ||
       !Object.values(draft.selected).some(Boolean);
     onceButton.disabled = startButton.disabled;
@@ -265,6 +344,9 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   }
   interval.addEventListener("change", () => { void saveDraft(); });
   cacheMode.addEventListener("change", () => { void saveDraft(); });
+  bookingEnabled.addEventListener("change", () => { void saveDraft(); });
+  bookingType.addEventListener("change", () => { void saveDraft(); });
+  bookingHorizon.addEventListener("change", () => { void saveDraft(); });
 
   async function beginRun(type) {
     if (pending || run) return;

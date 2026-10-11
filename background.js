@@ -2,9 +2,16 @@ const REVIEW_URL = "https://platform.21-school.ru/calendar/review/*";
 const ALARM_PREFIX = "s21-review-refresh:";
 const STATE_PREFIX = "s21-review-run:";
 const LOADING_TIMEOUT_MS = 90_000;
+const MAX_BOOKING_ATTEMPTS_PER_CYCLE = 20;
+const BOOKING_SUCCESS_COOLDOWN_MS = 600_000;
+const BOOKING_FAILURE_COOLDOWN_MS = 60_000;
 const INTERVALS = new Set([
   ...Array.from({ length: 15 }, (_, index) => index + 1),
   30, 60, 120, 180, 240, 300, 600, 1800
+]);
+const BOOKING_HOURS = new Set([
+  ...Array.from({ length: 24 }, (_, index) => index + 1),
+  ...Array.from({ length: 6 }, (_, index) => (index + 2) * 24)
 ]);
 const activeCycles = new Map();
 const tabLocks = new Map();
@@ -32,6 +39,7 @@ function isReviewUrl(url) {
 
 function normalizeConfig(value) {
   const selected = value?.selected ?? {};
+  const freeAndCount = selected.freeAndCount === true;
   const clearMode = ["keep", "selected", "all"].includes(value?.clearMode)
     ? value.clearMode
     : value?.clearBeforeRefresh === true ? "selected" : "keep";
@@ -43,7 +51,13 @@ function normalizeConfig(value) {
     selected: {
       own: selected.own === true,
       registered: selected.registered === true,
-      freeAndCount: selected.freeAndCount === true
+      freeAndCount
+    },
+    autoBooking: {
+      enabled: freeAndCount && value?.autoBooking?.enabled === true,
+      type: value?.autoBooking?.type === "offline" ? "offline" : "online",
+      horizonHours: BOOKING_HOURS.has(value?.autoBooking?.horizonHours)
+        ? value.autoBooking.horizonHours : 24
     }
   };
 }
@@ -157,7 +171,9 @@ async function refetchInPage(selected, clearMode, runId, cycleId) {
       query
     ])
   );
-  const found = wanted.map((name) => active.get(name)).filter(Boolean);
+  const foundEntries = wanted.map((name) => [name, active.get(name)])
+    .filter(([, query]) => Boolean(query));
+  const found = foundEntries.map(([, query]) => query);
   const missing = wanted.length - found.length;
   let processed = missing;
   const emitProgress = () => {
@@ -242,14 +258,249 @@ async function refetchInPage(selected, clearMode, runId, cycleId) {
   );
   const completed = results.filter((result) => result.status === "fulfilled").length;
   const failed = results.length - completed;
+  const freeIndex = foundEntries.findIndex(([name]) => name === operations.freeAndCount);
   return {
     status: completed === wanted.length ? "ok" : "partial",
     requested: wanted.length,
     completed,
     missing,
     failed,
-    cacheCleared
+    cacheCleared,
+    freeUpdated: freeIndex >= 0 && results[freeIndex].status === "fulfilled"
   };
+}
+
+// Runs in the site's MAIN world after a successful free-slot refetch. The
+// mutation and variables mirror the site's SignUpCard; Apollo supplies its
+// existing authentication and handles the server's normal validation.
+async function bookOneInPage(horizonHours, bookingType, excludedKeys, prpChecked) {
+  const client = window.__APOLLO_CLIENT__;
+  if (!client || typeof client.mutate !== "function" ||
+      typeof client.getObservableQueries !== "function") {
+    return { status: "unavailable" };
+  }
+  const queries = [...client.getObservableQueries("active").values()];
+  const findQuery = (name) => queries.find((query) =>
+    (query.queryName ?? query.options?.query?.definitions
+      ?.find((part) => part.kind === "OperationDefinition")?.name?.value) === name);
+  const freeQuery = findQuery("calendarGetNameLessStudentTimeslotsForReview");
+  const moduleQuery = findQuery("calendarGetModule");
+  const review = freeQuery?.getCurrentResult()?.data?.student
+    ?.getNameLessStudentTimeslotsForReview;
+  const module = moduleQuery?.getCurrentResult()?.data?.student?.getModuleById;
+  const task = module?.currentTask;
+  const answerId = task?.lastAnswer?.id;
+  const moduleId = moduleQuery?.variables?.moduleId ??
+    moduleQuery?.options?.variables?.moduleId ?? module?.id;
+  const taskId = freeQuery?.variables?.taskId ??
+    freeQuery?.options?.variables?.taskId;
+  if (!answerId || !task?.taskId || String(task.taskId) !== String(taskId) ||
+      String(moduleId) !== window.location.pathname.split("/").filter(Boolean).at(-1) ||
+      !Array.isArray(review?.timeSlots)) {
+    return { status: "missing_context", reason: "Нет данных модуля или свободных слотов" };
+  }
+
+  const info = review.projectReviewsInfo;
+  const counts = [info?.relevantReviewByStudentsCount, info?.reviewByStudentCount];
+  if (!counts.every((count) => Number.isInteger(count) && count >= 0)) {
+    return { status: "missing_context", reason: "Не найден счётчик проверок" };
+  }
+  const [studentCurrent, studentTarget] = counts;
+  const quota = { current: studentCurrent, target: studentTarget };
+  const needStudent = studentCurrent < studentTarget;
+  if (!needStudent) return { status: "complete", ...quota };
+
+  const now = Date.now();
+  const until = now + horizonHours * 3_600_000;
+  const excluded = new Set(excludedKeys);
+  const candidates = review.timeSlots.flatMap((slot) => {
+    if (slot?.staffSlot !== false) return [];
+    if (!Array.isArray(slot?.validStartTimes)) return [];
+    return slot.validStartTimes.flatMap((value) => {
+      const at = Date.parse(value);
+      if (!Number.isFinite(at) || at <= now || at > until) return [];
+      const startTime = new Date(at).toISOString();
+      const key = `student:${startTime}`;
+      return excluded.has(key) ? [] : [{ key, startTime, at }];
+    });
+  }).sort((a, b) => a.at - b.at);
+  const candidate = candidates[0];
+  if (!candidate) return { status: "no_slots", ...quota };
+
+  const name = (value) => ({ kind: "Name", value });
+  const variable = (value) => ({ kind: "Variable", name: name(value) });
+  const type = (value, required) => required
+    ? { kind: "NonNullType", type: { kind: "NamedType", name: name(value) } }
+    : { kind: "NamedType", name: name(value) };
+  const field = (value, args = [], children = null) => ({
+    kind: "Field", name: name(value), arguments: args,
+    ...(children ? { selectionSet: { kind: "SelectionSet", selections: children } } : {})
+  });
+  const args = ["answerId", "startTime", "wasStaffSlotChosen", "isOnline"]
+    .map((value) => ({ kind: "Argument", name: name(value), value: variable(value) }));
+  if (!prpChecked) {
+    // SignUpCard requires this task's PRP cost from every team member.
+    const cost = task.task?.studentTaskAdditionalAttributes?.cookiesCount ?? 0;
+    if (!Number.isFinite(cost) || cost < 0) {
+      return { status: "prp_unavailable", reason: "Неизвестна стоимость проверки в PRP",
+        ...quota };
+    }
+    if (cost > 0) {
+      if (typeof client.query !== "function") {
+        return { status: "prp_unavailable", reason: "Не удалось проверить баланс PRP",
+          ...quota };
+      }
+      const experienceQuery = {
+        kind: "Document",
+        definitions: [{
+          kind: "OperationDefinition", operation: "query",
+          name: name("calendarGetStudentExperience"),
+          selectionSet: { kind: "SelectionSet", selections: [field("student", [], [
+            field("getExperience", [], [field("id"), field("cookiesCount")])
+          ])] }
+        }]
+      };
+      let balance;
+      try {
+        const experience = await client.query({ query: experienceQuery,
+          fetchPolicy: "network-only" });
+        balance = experience?.data?.student?.getExperience?.cookiesCount;
+      } catch {
+        return { status: "prp_unavailable", reason: "Не удалось проверить баланс PRP",
+          ...quota };
+      }
+      if (!Number.isFinite(balance)) {
+        return { status: "prp_unavailable", reason: "Неизвестен баланс PRP",
+          ...quota };
+      }
+      if (balance < cost) {
+        return { status: "insufficient_prp",
+          reason: `Недостаточно PRP: есть ${balance}, нужно ${cost}`, ...quota };
+      }
+      if (task.task?.assignmentType === "GROUP") {
+        const teamQuery = findQuery("getProjectTeamMembers");
+        let members;
+        try {
+          const teamResult = await teamQuery?.refetch();
+          members = teamResult?.data?.student?.getProjectTeamMembers?.members;
+        } catch {
+          // A missing team balance must never be treated as sufficient PRP.
+        }
+        if (!Array.isArray(members) || members.some((member) =>
+          !Number.isFinite(member?.userExperience?.cookiesCount))) {
+          return { status: "prp_unavailable",
+            reason: "Не удалось проверить PRP участников команды", ...quota };
+        }
+        if (members.some((member) => member.userExperience.cookiesCount < cost)) {
+          return { status: "insufficient_prp",
+            reason: `У участника команды меньше ${cost} PRP`, ...quota };
+        }
+      }
+    }
+  }
+  const mutation = {
+    kind: "Document",
+    definitions: [{
+      kind: "OperationDefinition",
+      operation: "mutation",
+      name: name("calendarAddBookingToEventSlot"),
+      variableDefinitions: [
+        ["answerId", "ID", true],
+        ["startTime", "DateTime", true],
+        ["wasStaffSlotChosen", "Boolean", true],
+        ["isOnline", "Boolean", false]
+      ].map(([value, named, required]) => ({
+        kind: "VariableDefinition", variable: variable(value), type: type(named, required)
+      })),
+      selectionSet: { kind: "SelectionSet", selections: [field("student", [], [
+        field("addBookingP2PToEventSlot", args, [field("id")])
+      ])] }
+    }]
+  };
+  try {
+    const response = await client.mutate({
+      mutation,
+      variables: {
+        answerId,
+        startTime: candidate.startTime,
+        wasStaffSlotChosen: false,
+        isOnline: bookingType === "online"
+      }
+    });
+    if (!response?.data?.student?.addBookingP2PToEventSlot?.id) {
+      return { status: "failed", key: candidate.key,
+        startTime: candidate.startTime, reason: "Сервер не подтвердил запись",
+        prpChecked: true, ...quota };
+    }
+    const bookingsQuery = findQuery("calendarGetMyBookings");
+    if (typeof bookingsQuery?.refetch === "function") {
+      try { await bookingsQuery.refetch(); } catch {
+        // The booking succeeded; the next regular refresh can update this list.
+      }
+    }
+    return { status: "booked", key: candidate.key,
+      startTime: candidate.startTime, prpChecked: true, ...quota };
+  } catch (error) {
+    return { status: "failed", key: candidate.key,
+      startTime: candidate.startTime,
+      reason: String(error?.message ?? "Ошибка записи").slice(0, 200),
+      prpChecked: true, ...quota };
+  }
+}
+
+function isCurrentCycle(state, initial) {
+  return state?.runId === initial.runId && state.phase === "loading" &&
+    state.cycleId === initial.cycleId;
+}
+
+async function refreshCycleData(tabId, initial, requested) {
+  try {
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: refetchInPage,
+      args: [initial.config.selected, initial.config.clearMode,
+        initial.runId, initial.cycleId]
+    });
+    if (injection?.result) return injection.result;
+  } catch {
+    // Navigating or a missing Apollo client makes this cycle unavailable.
+  }
+  return { status: "unavailable", requested, completed: 0,
+    missing: requested, failed: 0, freeUpdated: false };
+}
+
+async function recordBookingResult(tabId, initial, booking) {
+  return withTabLock(tabId, async () => {
+    const current = await getState(tabId);
+    if (!isCurrentCycle(current, initial)) return false;
+    const now = Date.now();
+    const cooldowns = Object.fromEntries(Object.entries(current.bookingCooldowns ?? {})
+      .filter(([, until]) => Number.isFinite(until) && until > now)
+      .slice(-100));
+    if (booking.key && ["booked", "failed"].includes(booking.status)) {
+      cooldowns[booking.key] = now + (booking.status === "booked"
+        ? BOOKING_SUCCESS_COOLDOWN_MS : BOOKING_FAILURE_COOLDOWN_MS);
+    }
+    const attempted = booking.status === "booked" || booking.status === "failed";
+    const next = {
+      ...current,
+      bookingCooldowns: cooldowns,
+      lastBooking: {
+        status: booking.status,
+        startTime: booking.startTime ?? null,
+        current: booking.current ?? null,
+        target: booking.target ?? null,
+        reason: booking.reason ?? null,
+        at: now
+      },
+      ...(attempted ? { loadingStartedAt: now, loadingCompleted: 0 } : {})
+    };
+    await putState(tabId, next);
+    if (attempted) await scheduleAlarm(tabId, now + LOADING_TIMEOUT_MS);
+    await sendState(tabId, next);
+    return true;
+  });
 }
 
 async function runCycle(tabId, runId) {
@@ -293,33 +544,48 @@ async function runCycle(tabId, runId) {
     try { tab = await chrome.tabs.get(tabId); } catch { await stopRun(tabId, initial.runId); return; }
     if (!isReviewUrl(tab.url)) { await stopRun(tabId, initial.runId); return; }
 
-    let result;
     const requested = Object.values(initial.config.selected).filter(Boolean).length;
+    let result;
     if (tab.status === "loading") {
       result = { status: "unavailable", requested, completed: 0,
-        missing: requested, failed: 0 };
+        missing: requested, failed: 0, freeUpdated: false };
     } else {
-      try {
-        const [injection] = await chrome.scripting.executeScript({
-          target: { tabId },
-          world: "MAIN",
-          func: refetchInPage,
-          args: [initial.config.selected, initial.config.clearMode,
-            initial.runId, initial.cycleId]
-        });
-        result = injection?.result ?? { status: "unavailable", requested,
-          completed: 0, missing: requested, failed: 0 };
-      } catch {
-        result = { status: "unavailable", requested, completed: 0,
-          missing: requested, failed: 0 };
+      result = await refreshCycleData(tabId, initial, requested);
+      if (initial.config.autoBooking.enabled && result.freeUpdated) {
+        let prpChecked = false;
+        for (let attempts = 0; attempts < MAX_BOOKING_ATTEMPTS_PER_CYCLE; attempts++) {
+          const current = await getState(tabId);
+          if (!isCurrentCycle(current, initial)) break;
+          const excluded = Object.entries(current.bookingCooldowns ?? {})
+            .filter(([, until]) => until > Date.now())
+            .map(([key]) => key);
+          let booking;
+          try {
+            const [injection] = await chrome.scripting.executeScript({
+              target: { tabId },
+              world: "MAIN",
+              func: bookOneInPage,
+              args: [initial.config.autoBooking.horizonHours,
+                initial.config.autoBooking.type, excluded, prpChecked]
+            });
+            booking = injection?.result ?? { status: "unavailable" };
+          } catch {
+            booking = { status: "unavailable" };
+          }
+          if (!await recordBookingResult(tabId, initial, booking)) break;
+          if (booking.status !== "booked" && booking.status !== "failed") break;
+          prpChecked = booking.prpChecked === true;
+          if (booking.status === "failed") continue;
+          result = await refreshCycleData(tabId, initial, requested);
+          if (!result.freeUpdated) break;
+          prpChecked = false;
+        }
       }
     }
 
     await withTabLock(tabId, async () => {
       const current = await getState(tabId);
-      if (!current || current.runId !== initial.runId ||
-          current.phase !== "loading" ||
-          current.cycleId !== initial.cycleId) return;
+      if (!isCurrentCycle(current, initial)) return;
       if (current.oneShot) {
         await stopRunUnlocked(tabId, initial.runId);
         return;

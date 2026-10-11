@@ -46,8 +46,8 @@ function createHarness() {
       onUpdated: listener
     },
     scripting: {
-      executeScript() {
-        return new Promise((resolve) => injections.push(resolve));
+      executeScript(details) {
+        return new Promise((resolve) => injections.push({ resolve, details }));
       },
       async insertCSS() {}
     },
@@ -72,13 +72,13 @@ function createHarness() {
       for (let attempt = 0; attempt < 100 && !injections.length; attempt++) await pause();
       assert.ok(injections.length, "the GraphQL refresh was started");
     },
-    finishInjection() {
-      const resolve = injections.shift();
-      assert.ok(resolve);
-      resolve([{ result: {
+    finishInjection(result = {
         status: "ok", requested: 1, completed: 1,
         missing: 0, failed: 0, cacheCleared: true
-      } }]);
+    }) {
+      const injection = injections.shift();
+      assert.ok(injection);
+      injection.resolve([{ result }]);
     }
   };
 }
@@ -279,4 +279,286 @@ test("legacy clear configuration is migrated", () => {
   assert.equal(h.sandbox.normalizeConfig({ clearBeforeRefresh: true }).clearMode,
     "selected");
   assert.equal(h.sandbox.normalizeConfig({ clearMode: "all" }).clearMode, "all");
+});
+
+test("auto booking needs free slots and a supported time horizon", () => {
+  const h = createHarness();
+  const selected = { own: false, registered: false, freeAndCount: true };
+  const normalize = h.sandbox.normalizeConfig;
+  assert.equal(normalize({ selected }).autoBooking.enabled, false);
+  assert.equal(normalize({ selected }).autoBooking.type, "online");
+  assert.equal(normalize({ selected, autoBooking: { type: "offline" } })
+    .autoBooking.type, "offline");
+  assert.equal(normalize({ selected, autoBooking: { type: "other" } })
+    .autoBooking.type, "online");
+  assert.equal(normalize({ selected, autoBooking: {
+    enabled: true, horizonHours: 168
+  } }).autoBooking.horizonHours, 168);
+  assert.equal(normalize({ selected, autoBooking: {
+    enabled: true, horizonHours: 25
+  } }).autoBooking.horizonHours, 24);
+  assert.equal(normalize({ selected: { ...selected, freeAndCount: false },
+    autoBooking: { enabled: true, horizonHours: 24 } }).autoBooking.enabled, false);
+});
+
+test("booking uses the site's mutation for the earliest valid start time", async () => {
+  const h = createHarness();
+  const staffSooner = new Date(Date.now() + 15 * 60_000).toISOString();
+  const sooner = new Date(Date.now() + 30 * 60_000).toISOString();
+  const later = new Date(Date.now() + 90 * 60_000).toISOString();
+  let mutation;
+  const queries = [{
+    queryName: "calendarGetModule",
+    variables: { moduleId: "69046" },
+    getCurrentResult: () => ({ data: { student: { getModuleById: {
+      currentTask: { taskId: "task-1", lastAnswer: { id: "answer-1" } }
+    } } } })
+  }, {
+    queryName: "calendarGetNameLessStudentTimeslotsForReview",
+    variables: { taskId: "task-1" },
+    getCurrentResult: () => ({ data: { student: {
+      getNameLessStudentTimeslotsForReview: {
+        projectReviewsInfo: {
+          relevantReviewByStudentsCount: 2, reviewByStudentCount: 3,
+          relevantReviewByInspectionStaffCount: 0, reviewByInspectionStaffCount: 1
+        },
+        timeSlots: [
+          { staffSlot: true, validStartTimes: [staffSooner] },
+          { staffSlot: false, validStartTimes: [later, sooner] }
+        ]
+      }
+    } } })
+  }];
+  h.sandbox.window = {
+    location: { pathname: "/calendar/review/69046" },
+    __APOLLO_CLIENT__: {
+      getObservableQueries: () => new Map(queries.map((query, index) => [index, query])),
+      async mutate(options) {
+        mutation = options;
+        return { data: { student: { addBookingP2PToEventSlot: { id: "booking-1" } } } };
+      }
+    }
+  };
+
+  const result = await h.sandbox.bookOneInPage(1, "online", []);
+  assert.equal(result.status, "booked");
+  assert.equal(result.startTime, sooner);
+  assert.equal(mutation.variables.answerId, "answer-1");
+  assert.equal(mutation.variables.startTime, sooner);
+  assert.equal(mutation.variables.wasStaffSlotChosen, false);
+  assert.equal(mutation.variables.isOnline, true);
+  assert.equal(mutation.mutation.definitions[0].name.value,
+    "calendarAddBookingToEventSlot");
+
+  assert.equal((await h.sandbox.bookOneInPage(1, "online", [result.key])).status,
+    "no_slots");
+  assert.equal((await h.sandbox.bookOneInPage(2, "online", [result.key]))
+    .startTime, later);
+  await h.sandbox.bookOneInPage(1, "offline", []);
+  assert.equal(mutation.variables.isOnline, false);
+  assert.equal(mutation.variables.wasStaffSlotChosen, false);
+  assert.equal(mutation.variables.startTime, sooner);
+  mutation = null;
+  h.sandbox.window.location.pathname = "/calendar/review/another-project";
+  assert.equal((await h.sandbox.bookOneInPage(2, "online", [])).status,
+    "missing_context");
+  assert.equal(mutation, null);
+});
+
+test("booking stops when the required review count is reached", async () => {
+  const h = createHarness();
+  const start = new Date(Date.now() + 30 * 60_000).toISOString();
+  h.sandbox.window = {
+    location: { pathname: "/calendar/review/69046" },
+    __APOLLO_CLIENT__: {
+      getObservableQueries: () => new Map([
+        [1, { queryName: "calendarGetModule", variables: { moduleId: "69046" },
+          getCurrentResult: () => ({ data: { student: { getModuleById: {
+            currentTask: { taskId: "task-1", lastAnswer: { id: "answer-1" } }
+          } } } }) }],
+        [2, { queryName: "calendarGetNameLessStudentTimeslotsForReview",
+          variables: { taskId: "task-1" },
+          getCurrentResult: () => ({ data: { student: {
+            getNameLessStudentTimeslotsForReview: {
+              projectReviewsInfo: {
+                relevantReviewByStudentsCount: 3, reviewByStudentCount: 3,
+                relevantReviewByInspectionStaffCount: 0, reviewByInspectionStaffCount: 1
+              },
+              timeSlots: [{ staffSlot: false, validStartTimes: [start] }]
+            }
+          } } }) }]
+      ]),
+      mutate() { throw new Error("must not book beyond quota"); }
+    }
+  };
+  const result = await h.sandbox.bookOneInPage(1, "online", []);
+  assert.equal(result.status, "complete");
+  assert.equal(result.current, 3);
+  assert.equal(result.target, 3);
+});
+
+test("booking checks PRP for the student and teammates before mutation", async () => {
+  const h = createHarness();
+  const start = new Date(Date.now() + 30 * 60_000).toISOString();
+  let balance = 1;
+  let teammateBalance = 1;
+  let mutations = 0;
+  let experienceQueries = 0;
+  const queries = [{
+    queryName: "calendarGetModule", variables: { moduleId: "69046" },
+    getCurrentResult: () => ({ data: { student: { getModuleById: {
+      currentTask: { taskId: "task-1", lastAnswer: { id: "answer-1" },
+        task: { assignmentType: "GROUP",
+          studentTaskAdditionalAttributes: { cookiesCount: 2 } } }
+    } } } })
+  }, {
+    queryName: "calendarGetNameLessStudentTimeslotsForReview",
+    variables: { taskId: "task-1" },
+    getCurrentResult: () => ({ data: { student: {
+      getNameLessStudentTimeslotsForReview: {
+        projectReviewsInfo: {
+          relevantReviewByStudentsCount: 0, reviewByStudentCount: 1
+        },
+        timeSlots: [{ staffSlot: false, validStartTimes: [start] }]
+      }
+    } } })
+  }, {
+    queryName: "getProjectTeamMembers",
+    refetch: async () => ({ data: { student: { getProjectTeamMembers: {
+      members: [{ userExperience: { cookiesCount: teammateBalance } }]
+    } } } })
+  }];
+  h.sandbox.window = {
+    location: { pathname: "/calendar/review/69046" },
+    __APOLLO_CLIENT__: {
+      getObservableQueries: () => new Map(queries.map((query, index) => [index, query])),
+      async query(options) {
+        experienceQueries++;
+        assert.equal(options.fetchPolicy, "network-only");
+        assert.equal(options.query.definitions[0].name.value,
+          "calendarGetStudentExperience");
+        return { data: { student: { getExperience: { cookiesCount: balance } } } };
+      },
+      async mutate() {
+        mutations++;
+        return { data: { student: { addBookingP2PToEventSlot: { id: "booking-1" } } } };
+      }
+    }
+  };
+  assert.equal((await h.sandbox.bookOneInPage(1, "online", [], false)).status,
+    "insufficient_prp");
+  assert.equal(mutations, 0);
+  balance = 2;
+  assert.equal((await h.sandbox.bookOneInPage(1, "online", [], false)).status,
+    "insufficient_prp");
+  assert.equal(mutations, 0);
+  teammateBalance = 2;
+  assert.equal((await h.sandbox.bookOneInPage(1, "online", [], false)).status,
+    "booked");
+  assert.equal(mutations, 1);
+  assert.equal(experienceQueries, 3);
+});
+
+test("auto booking refreshes between signups and finishes its one-shot run", async () => {
+  const h = createHarness();
+  const bookingConfig = {
+    intervalSeconds: 5,
+    clearMode: "keep",
+    selected: { own: false, registered: false, freeAndCount: true },
+    autoBooking: { enabled: true, horizonHours: 24 }
+  };
+  await h.sandbox.startRun(1, bookingConfig, true);
+  await h.waitForInjection();
+  assert.equal(h.injections[0].details.func.name, "refetchInPage");
+  h.finishInjection({ status: "ok", requested: 1, completed: 1,
+    missing: 0, failed: 0, freeUpdated: true });
+  await h.waitForInjection();
+  assert.equal(h.injections[0].details.func.name, "bookOneInPage");
+  assert.equal(h.injections[0].details.args[3], false);
+  assert.equal(h.injections[0].details.args[1], "online");
+  h.finishInjection({ status: "booked", key: "student:slot-1",
+    startTime: "slot-1", current: 2, target: 3, prpChecked: true });
+  await h.waitForInjection();
+  assert.equal(h.injections[0].details.func.name, "refetchInPage");
+  h.finishInjection({ status: "ok", requested: 1, completed: 1,
+    missing: 0, failed: 0, freeUpdated: true });
+  await h.waitForInjection();
+  assert.equal(h.injections[0].details.func.name, "bookOneInPage");
+  assert.equal(h.injections[0].details.args[3], false);
+  h.finishInjection({ status: "complete", current: 3, target: 3 });
+  for (let attempt = 0; attempt < 100 && h.states.has(stateKey); attempt++) await pause();
+  assert.equal(h.states.has(stateKey), false);
+  assert.equal(h.alarms.size, 0);
+});
+
+test("stop during a booking prevents another refresh or booking", async () => {
+  const h = createHarness();
+  await h.sandbox.startRun(1, {
+    intervalSeconds: 5,
+    clearMode: "keep",
+    selected: { own: false, registered: false, freeAndCount: true },
+    autoBooking: { enabled: true, horizonHours: 24 }
+  }, true);
+  await h.waitForInjection();
+  h.finishInjection({ status: "ok", requested: 1, completed: 1,
+    missing: 0, failed: 0, freeUpdated: true });
+  await h.waitForInjection();
+  assert.equal(h.injections[0].details.func.name, "bookOneInPage");
+  await h.sandbox.stopRun(1);
+  h.finishInjection({ status: "booked", key: "student:slot-1",
+    startTime: "slot-1", current: 2, target: 3 });
+  for (let attempt = 0; attempt < 10; attempt++) await pause();
+  assert.equal(h.injections.length, 0);
+  assert.equal(h.states.has(stateKey), false);
+});
+
+test("timer keeps running after the review quota is full", async () => {
+  const h = createHarness();
+  await h.sandbox.startRun(1, {
+    intervalSeconds: 5,
+    clearMode: "keep",
+    selected: { own: false, registered: false, freeAndCount: true },
+    autoBooking: { enabled: true, horizonHours: 24 }
+  });
+  h.states.get(stateKey).nextAt = Date.now() - 1;
+  const cycle = h.sandbox.runCycle(1);
+  await h.waitForInjection();
+  h.finishInjection({ status: "ok", requested: 1, completed: 1,
+    missing: 0, failed: 0, freeUpdated: true });
+  await h.waitForInjection();
+  h.finishInjection({ status: "complete", current: 3, target: 3 });
+  await cycle;
+  assert.equal(h.states.get(stateKey).phase, "waiting");
+  assert.equal(h.states.get(stateKey).lastBooking.status, "complete");
+  assert.equal(h.alarms.size, 1);
+});
+
+test("a failed slot is skipped without refreshing before the next attempt", async () => {
+  const h = createHarness();
+  await h.sandbox.startRun(1, {
+    intervalSeconds: 5,
+    clearMode: "keep",
+    selected: { own: false, registered: false, freeAndCount: true },
+    autoBooking: { enabled: true, horizonHours: 24 }
+  }, true);
+  await h.waitForInjection();
+  h.finishInjection({ status: "ok", requested: 1, completed: 1,
+    missing: 0, failed: 0, freeUpdated: true });
+  await h.waitForInjection();
+  h.finishInjection({ status: "failed", key: "student:slot-1",
+    startTime: "slot-1", current: 2, target: 3, prpChecked: true });
+  await h.waitForInjection();
+  assert.equal(h.injections[0].details.func.name, "bookOneInPage");
+  assert.ok(h.injections[0].details.args[2].includes("student:slot-1"));
+  assert.equal(h.injections[0].details.args[3], true);
+  h.finishInjection({ status: "booked", key: "student:slot-2",
+    startTime: "slot-2", current: 2, target: 3 });
+  await h.waitForInjection();
+  assert.equal(h.injections[0].details.func.name, "refetchInPage");
+  h.finishInjection({ status: "ok", requested: 1, completed: 1,
+    missing: 0, failed: 0, freeUpdated: true });
+  await h.waitForInjection();
+  h.finishInjection({ status: "complete", current: 3, target: 3 });
+  for (let attempt = 0; attempt < 100 && h.states.has(stateKey); attempt++) await pause();
+  assert.equal(h.states.has(stateKey), false);
 });
