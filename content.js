@@ -1,6 +1,4 @@
 if (!globalThis.__school21RefreshPanelInstalled) {
-  globalThis.__school21RefreshPanelInstalled = true;
-
   const DEFAULT_CONFIG = {
     intervalSeconds: 60,
     clearMode: "keep",
@@ -17,17 +15,26 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     ...Array.from({ length: 24 }, (_, index) => index + 1),
     ...Array.from({ length: 6 }, (_, index) => (index + 2) * 24)
   ]);
+  const BOOKING_WARNINGS = {
+    failed: "Ошибка записи",
+    insufficient_prp: "Недостаточно PRP",
+    prp_unavailable: "Не удалось проверить PRP",
+    missing_context: "Данные для записи недоступны",
+    unavailable: "Не удалось проверить запись"
+  };
   const PANEL_ID = "s21-refresh-panel";
   let draft = DEFAULT_CONFIG;
   let run = null;
   let stateRevision = 0;
-  let pending = false;
+  let pending = true;
   let uiError = "";
   let health = { level: "ok", message: "Проблем нет", reason: "", at: Date.now() };
+  let renderedHealth = null;
   let cycleKey = "";
   let lastProgress = 0;
   let tickTimer = null;
   let tickKey = "";
+  let progressTimer = null;
 
   const panel = document.createElement("div");
   panel.id = PANEL_ID;
@@ -241,6 +248,8 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   function syncPlacement() {
     if (!isReviewPage()) {
       panel.remove();
+      syncProgressTicker();
+      syncShortIntervalTimer();
       return;
     }
     if (!document.body) return;
@@ -255,6 +264,8 @@ if (!globalThis.__school21RefreshPanelInstalled) {
       ? channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722
       : 255;
     panel.classList.toggle("s21-dark", luminance < 130);
+    syncProgressTicker();
+    syncShortIntervalTimer();
   }
 
   function updateHealth(snapshot) {
@@ -263,34 +274,43 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     const booking = snapshot.config?.autoBooking?.enabled ? snapshot.lastBooking : null;
     const warnings = [];
     if (Number.isFinite(result?.at)) {
-      const message = result.status === "timeout" ? "Превышено время загрузки"
-        : result.status !== "ok" || result.failed || result.missing
-          ? "Ошибка обновления календаря"
-          : snapshot.config.clearMode !== "keep" && !result.cacheCleared
-            ? "Не удалось очистить старые данные" : null;
+      let message = null;
+      if (result.status === "timeout") {
+        message = "Превышено время загрузки";
+      } else if (result.status !== "ok" || result.failed || result.missing) {
+        message = "Ошибка обновления календаря";
+      } else if (snapshot.config.clearMode !== "keep" && !result.cacheCleared) {
+        message = "Не удалось очистить старые данные";
+      }
       if (message) warnings.push({ message, reason: message, at: result.at });
     }
-    const bookingWarnings = {
-      failed: "Ошибка записи",
-      insufficient_prp: "Недостаточно PRP",
-      prp_unavailable: "Не удалось проверить PRP",
-      missing_context: "Данные для записи недоступны",
-      unavailable: "Не удалось проверить запись"
-    };
-    if (Number.isFinite(booking?.at) && bookingWarnings[booking.status]) {
-      warnings.push({ message: bookingWarnings[booking.status],
+    if (Number.isFinite(booking?.at) && BOOKING_WARNINGS[booking.status]) {
+      warnings.push({ message: BOOKING_WARNINGS[booking.status],
         reason: booking.reason ?? "", at: booking.at });
     }
     if (!warnings.length) return;
     const latest = warnings.reduce((a, b) => a.at >= b.at ? a : b);
-    if (health.level !== "warning" || latest.at > health.at) {
-      health = { level: "warning", ...latest };
+    setHealthWarning(latest.message, latest.reason, latest.at);
+  }
+
+  function setHealthWarning(message, reason = message, at = Date.now()) {
+    // A healthy refresh cannot clear a warning in this page session.
+    if (health.level === "warning" && (at < health.at ||
+        (at === health.at && message === health.message && reason === health.reason))) {
+      return;
     }
+    health = { level: "warning", message, reason, at };
+  }
+
+  function reportError(message) {
+    uiError = message;
+    setHealthWarning(message);
   }
 
   function renderHealth() {
-    healthIndicator.hidden = !health;
-    if (!health) return;
+    if (health === renderedHealth) return;
+    renderedHealth = health;
+    healthIndicator.hidden = false;
     healthIndicator.dataset.level = health.level;
     healthIndicator.title = health.reason || health.message;
     healthLabel.textContent = health.message;
@@ -386,6 +406,16 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     }, Math.max(0, run.nextAt - Date.now()));
   }
 
+  function syncProgressTicker() {
+    const shouldTick = isReviewPage() && run?.phase === "waiting";
+    if (shouldTick && progressTimer === null) {
+      progressTimer = setInterval(renderProgress, 200);
+    } else if (!shouldTick && progressTimer !== null) {
+      clearInterval(progressTimer);
+      progressTimer = null;
+    }
+  }
+
   function render() {
     const running = Boolean(run);
     showConfig(running ? run.config : draft);
@@ -403,6 +433,7 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     onceButton.disabled = startButton.disabled;
     stopButton.disabled = !running || pending;
     renderProgress();
+    syncProgressTicker();
     syncShortIntervalTimer();
   }
 
@@ -410,7 +441,12 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     draft = normalizeConfig(readConfig());
     uiError = "";
     render();
-    await chrome.storage.local.set({ draft });
+    try {
+      await chrome.storage.local.set({ draft });
+    } catch {
+      reportError("Не удалось сохранить настройки");
+      render();
+    }
   }
 
   for (const input of Object.values(options)) {
@@ -434,11 +470,11 @@ if (!globalThis.__school21RefreshPanelInstalled) {
         type, config: draft
       });
       if (!response?.ok) {
-        uiError = response?.error ?? "Не удалось запустить";
+        reportError(response?.error ?? "Не удалось запустить");
       }
       // S21_STATE carries the latest state, including an already stopped run.
     } catch {
-      uiError = "Не удалось связаться с расширением";
+      reportError("Не удалось связаться с расширением");
     }
     pending = false;
     render();
@@ -455,9 +491,9 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     try {
       const response = await chrome.runtime.sendMessage({ type: "S21_STOP" });
       if (response?.ok) run = null;
-      else uiError = response?.error ?? "Не удалось остановить";
+      else reportError(response?.error ?? "Не удалось остановить");
     } catch {
-      uiError = "Не удалось связаться с расширением";
+      reportError("Не удалось связаться с расширением");
     }
     pending = false;
     render();
@@ -495,8 +531,12 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   });
 
   void (async () => {
-    const saved = await chrome.storage.local.get("draft");
-    draft = normalizeConfig(saved.draft);
+    try {
+      const saved = await chrome.storage.local.get("draft");
+      draft = normalizeConfig(saved.draft);
+    } catch {
+      reportError("Не удалось загрузить настройки");
+    }
     const revisionBeforeRequest = stateRevision;
     try {
       const response = await chrome.runtime.sendMessage({ type: "S21_GET_STATE" });
@@ -505,8 +545,9 @@ if (!globalThis.__school21RefreshPanelInstalled) {
         updateHealth(run);
       }
     } catch {
-      uiError = "Не удалось связаться с расширением";
+      reportError("Не удалось связаться с расширением");
     }
+    pending = false;
     render();
     syncPlacement();
     syncShortIntervalTimer();
@@ -551,5 +592,7 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   observePlacement();
   window.addEventListener("popstate", queuePlacement);
   window.addEventListener("hashchange", queuePlacement);
-  setInterval(renderProgress, 200);
+  render();
+  syncPlacement();
+  globalThis.__school21RefreshPanelInstalled = true;
 }
