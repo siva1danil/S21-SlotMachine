@@ -58,7 +58,13 @@ function normalizeConfig(value) {
       enabled: freeAndCount && value?.autoBooking?.enabled === true,
       type: value?.autoBooking?.type === "offline" ? "offline" : "online",
       horizonHours: BOOKING_HOURS.has(value?.autoBooking?.horizonHours)
-        ? value.autoBooking.horizonHours : 24
+        ? value.autoBooking.horizonHours : 24,
+      startHour: Number.isInteger(value?.autoBooking?.startHour) &&
+        value.autoBooking.startHour >= 0 && value.autoBooking.startHour < 24
+        ? value.autoBooking.startHour : 0,
+      endHour: Number.isInteger(value?.autoBooking?.endHour) &&
+        value.autoBooking.endHour >= 0 && value.autoBooking.endHour <= 24
+        ? value.autoBooking.endHour : 24
     }
   };
 }
@@ -274,7 +280,8 @@ async function refetchInPage(selected, clearMode, runId, cycleId) {
 // Runs in the site's MAIN world after a successful free-slot refetch. The
 // mutation and variables mirror the site's SignUpCard; Apollo supplies its
 // existing authentication and handles the server's normal validation.
-async function bookOneInPage(horizonHours, bookingType, excludedKeys, prpChecked) {
+async function bookOneInPage(horizonHours, bookingType, excludedKeys, prpChecked,
+  startHour = 0, endHour = 24) {
   const client = window.__APOLLO_CLIENT__;
   if (!client || typeof client.mutate !== "function" ||
       typeof client.getObservableQueries !== "function") {
@@ -320,7 +327,15 @@ async function bookOneInPage(horizonHours, bookingType, excludedKeys, prpChecked
     return slot.validStartTimes.flatMap((value) => {
       const at = Date.parse(value);
       if (!Number.isFinite(at) || at <= now || at > until) return [];
-      const startTime = new Date(at).toISOString();
+      const localStart = new Date(at);
+      const minuteOfDay = localStart.getHours() * 60 + localStart.getMinutes();
+      const fromMinute = startHour * 60;
+      const toMinute = endHour * 60;
+      const inWindow = fromMinute === toMinute || (fromMinute < toMinute
+        ? minuteOfDay >= fromMinute && minuteOfDay < toMinute
+        : minuteOfDay >= fromMinute || minuteOfDay < toMinute);
+      if (!inWindow) return [];
+      const startTime = localStart.toISOString();
       const key = `student:${startTime}`;
       return excluded.has(key) ? [] : [{ key, startTime, at }];
     });
@@ -567,7 +582,8 @@ async function runCycle(tabId, runId) {
               world: "MAIN",
               func: bookOneInPage,
               args: [initial.config.autoBooking.horizonHours,
-                initial.config.autoBooking.type, excluded, prpChecked]
+                initial.config.autoBooking.type, excluded, prpChecked,
+                initial.config.autoBooking.startHour, initial.config.autoBooking.endHour]
             });
             booking = injection?.result ?? { status: "unavailable" };
           } catch {

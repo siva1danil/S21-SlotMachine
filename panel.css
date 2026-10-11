@@ -99,7 +99,8 @@
 #s21-refresh-panel .s21-booking-controls,
 #s21-refresh-panel .s21-booking-enable,
 #s21-refresh-panel .s21-booking-type,
-#s21-refresh-panel .s21-booking-horizon {
+#s21-refresh-panel .s21-booking-horizon,
+#s21-refresh-panel .s21-booking-window {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -107,7 +108,26 @@
 #s21-refresh-panel .s21-booking-controls { flex-wrap: wrap; gap: 18px; }
 #s21-refresh-panel .s21-booking-enable { cursor: pointer; }
 #s21-refresh-panel .s21-booking-type,
-#s21-refresh-panel .s21-booking-horizon { color: var(--s21-muted); }
+#s21-refresh-panel .s21-booking-horizon,
+#s21-refresh-panel .s21-booking-window { color: var(--s21-muted); }
+#s21-refresh-panel .s21-time-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 36px;
+  padding: 0 4px;
+  border-radius: 6px;
+  color: var(--s21-text);
+  background: var(--s21-field);
+  white-space: nowrap;
+}
+#s21-refresh-panel .s21-time-range select {
+  min-width: 74px;
+  height: 100%;
+  padding: 5px 2px;
+  background: transparent;
+  font-variant-numeric: tabular-nums;
+}
 #s21-refresh-panel .s21-booking-status {
   margin-left: auto;
   color: var(--s21-muted);

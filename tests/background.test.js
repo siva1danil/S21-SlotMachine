@@ -359,6 +359,20 @@ test("auto booking needs free slots and a supported time horizon", () => {
   assert.equal(normalize({ selected, autoBooking: {
     enabled: true, horizonHours: 25
   } }).autoBooking.horizonHours, 24);
+  assert.equal(normalize({ selected }).autoBooking.startHour, 0);
+  assert.equal(normalize({ selected }).autoBooking.endHour, 24);
+  assert.equal(normalize({ selected, autoBooking: {
+    startHour: 22, endHour: 6
+  } }).autoBooking.startHour, 22);
+  assert.equal(normalize({ selected, autoBooking: {
+    startHour: 22, endHour: 6
+  } }).autoBooking.endHour, 6);
+  assert.equal(normalize({ selected, autoBooking: {
+    startHour: 24, endHour: 25
+  } }).autoBooking.startHour, 0);
+  assert.equal(normalize({ selected, autoBooking: {
+    startHour: 24, endHour: 25
+  } }).autoBooking.endHour, 24);
   assert.equal(normalize({ selected: { ...selected, freeAndCount: false },
     autoBooking: { enabled: true, horizonHours: 24 } }).autoBooking.enabled, false);
 });
@@ -425,6 +439,59 @@ test("booking uses the site's mutation for the earliest valid start time", async
   assert.equal((await h.sandbox.bookOneInPage(2, "online", [])).status,
     "missing_context");
   assert.equal(mutation, null);
+});
+
+test("booking filters slot starts by local hour, including an overnight range", async () => {
+  const h = createHarness();
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const localStart = (dayOffset, hour, minute = 0) => {
+    const value = new Date(tomorrow);
+    value.setDate(value.getDate() + dayOffset);
+    value.setHours(hour, minute, 0, 0);
+    return value.toISOString();
+  };
+  const morning = localStart(0, 9);
+  const afternoon = localStart(0, 17, 30);
+  const endBoundary = localStart(0, 18);
+  const late = localStart(0, 23);
+  const early = localStart(1, 2);
+  let mutations = 0;
+  h.sandbox.window = {
+    location: { pathname: "/calendar/review/69046" },
+    __APOLLO_CLIENT__: {
+      getObservableQueries: () => new Map([
+        [1, { queryName: "calendarGetModule", variables: { moduleId: "69046" },
+          getCurrentResult: () => ({ data: { student: { getModuleById: {
+            currentTask: { taskId: "task-1", lastAnswer: { id: "answer-1" } }
+          } } } }) }],
+        [2, { queryName: "calendarGetNameLessStudentTimeslotsForReview",
+          variables: { taskId: "task-1" },
+          getCurrentResult: () => ({ data: { student: {
+            getNameLessStudentTimeslotsForReview: {
+              projectReviewsInfo: {
+                relevantReviewByStudentsCount: 0, reviewByStudentCount: 1
+              },
+              timeSlots: [{ staffSlot: false,
+                validStartTimes: [morning, afternoon, endBoundary, late, early] }]
+            }
+          } } }) }]
+      ]),
+      async mutate() {
+        mutations++;
+        return { data: { student: { addBookingP2PToEventSlot: { id: "booking-1" } } } };
+      }
+    }
+  };
+  assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 10, 18))
+    .startTime, afternoon);
+  assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 22, 6))
+    .startTime, late);
+  assert.equal((await h.sandbox.bookOneInPage(72, "online", [`student:${late}`],
+    false, 22, 6)).startTime, early);
+  assert.equal((await h.sandbox.bookOneInPage(72, "online", [], false, 0, 24))
+    .startTime, morning);
+  assert.equal(mutations, 4);
 });
 
 test("booking stops when the required review count is reached", async () => {
@@ -538,6 +605,8 @@ test("auto booking refreshes between signups and finishes its one-shot run", asy
   assert.equal(h.injections[0].details.func.name, "bookOneInPage");
   assert.equal(h.injections[0].details.args[3], false);
   assert.equal(h.injections[0].details.args[1], "online");
+  assert.equal(h.injections[0].details.args[4], 0);
+  assert.equal(h.injections[0].details.args[5], 24);
   h.finishInjection({ status: "booked", key: "student:slot-1",
     startTime: "slot-1", current: 2, target: 3, prpChecked: true });
   await h.waitForInjection();

@@ -5,7 +5,9 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     intervalSeconds: 60,
     clearMode: "keep",
     selected: { own: true, registered: true, freeAndCount: true },
-    autoBooking: { enabled: false, horizonHours: 24, type: "online" }
+    autoBooking: {
+      enabled: false, horizonHours: 24, type: "online", startHour: 0, endHour: 24
+    }
   };
   const INTERVALS = new Set([
     ...Array.from({ length: 15 }, (_, index) => index + 1),
@@ -87,6 +89,20 @@ if (!globalThis.__school21RefreshPanelInstalled) {
                 `<option value="${(index + 2) * 24}">${index + 2} сут</option>`).join("")}
             </select>
           </label>
+          <div class="s21-booking-window">
+            <span id="s21-booking-window-label">Слоты в промежутке</span>
+            <span class="s21-time-range" role="group" aria-labelledby="s21-booking-window-label">
+              <select data-s21="booking-start-hour" aria-label="Начало промежутка">
+                ${Array.from({ length: 24 }, (_, hour) =>
+                  `<option value="${hour}">${String(hour).padStart(2, "0")}:00</option>`).join("")}
+              </select>
+              <span aria-hidden="true">–</span>
+              <select data-s21="booking-end-hour" aria-label="Конец промежутка">
+                ${Array.from({ length: 25 }, (_, hour) =>
+                  `<option value="${hour}">${String(hour).padStart(2, "0")}:00</option>`).join("")}
+              </select>
+            </span>
+          </div>
           <span class="s21-booking-status" data-s21="booking-status" aria-live="polite"></span>
         </div>
       </div>
@@ -123,6 +139,8 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   const bookingEnabled = panel.querySelector('[data-s21="booking-enabled"]');
   const bookingType = panel.querySelector('[data-s21="booking-type"]');
   const bookingHorizon = panel.querySelector('[data-s21="booking-horizon"]');
+  const bookingStartHour = panel.querySelector('[data-s21="booking-start-hour"]');
+  const bookingEndHour = panel.querySelector('[data-s21="booking-end-hour"]');
   const bookingStatus = panel.querySelector('[data-s21="booking-status"]');
   const startButton = panel.querySelector('[data-s21="start"]');
   const onceButton = panel.querySelector('[data-s21="once"]');
@@ -151,7 +169,13 @@ if (!globalThis.__school21RefreshPanelInstalled) {
         enabled: freeAndCount && value?.autoBooking?.enabled === true,
         type: value?.autoBooking?.type === "offline" ? "offline" : "online",
         horizonHours: BOOKING_HOURS.has(value?.autoBooking?.horizonHours)
-          ? value.autoBooking.horizonHours : 24
+          ? value.autoBooking.horizonHours : 24,
+        startHour: Number.isInteger(value?.autoBooking?.startHour) &&
+          value.autoBooking.startHour >= 0 && value.autoBooking.startHour < 24
+          ? value.autoBooking.startHour : 0,
+        endHour: Number.isInteger(value?.autoBooking?.endHour) &&
+          value.autoBooking.endHour >= 0 && value.autoBooking.endHour <= 24
+          ? value.autoBooking.endHour : 24
       }
     };
   }
@@ -163,7 +187,9 @@ if (!globalThis.__school21RefreshPanelInstalled) {
       autoBooking: {
         enabled: bookingEnabled.checked,
         type: bookingType.value,
-        horizonHours: Number(bookingHorizon.value)
+        horizonHours: Number(bookingHorizon.value),
+        startHour: Number(bookingStartHour.value),
+        endHour: Number(bookingEndHour.value)
       },
       selected: Object.fromEntries(
         Object.entries(options).map(([key, input]) => [key, input.checked])
@@ -177,6 +203,8 @@ if (!globalThis.__school21RefreshPanelInstalled) {
     bookingEnabled.checked = config.autoBooking.enabled;
     bookingType.value = config.autoBooking.type;
     bookingHorizon.value = String(config.autoBooking.horizonHours);
+    bookingStartHour.value = String(config.autoBooking.startHour);
+    bookingEndHour.value = String(config.autoBooking.endHour);
     for (const [key, input] of Object.entries(options)) {
       input.checked = config.selected[key];
     }
@@ -329,6 +357,8 @@ if (!globalThis.__school21RefreshPanelInstalled) {
       !(running ? run.config : draft).selected.freeAndCount;
     bookingType.disabled = running || pending || !bookingEnabled.checked;
     bookingHorizon.disabled = running || pending || !bookingEnabled.checked;
+    bookingStartHour.disabled = running || pending || !bookingEnabled.checked;
+    bookingEndHour.disabled = running || pending || !bookingEnabled.checked;
     startButton.disabled = running || pending ||
       !Object.values(draft.selected).some(Boolean);
     onceButton.disabled = startButton.disabled;
@@ -352,6 +382,8 @@ if (!globalThis.__school21RefreshPanelInstalled) {
   bookingEnabled.addEventListener("change", () => { void saveDraft(); });
   bookingType.addEventListener("change", () => { void saveDraft(); });
   bookingHorizon.addEventListener("change", () => { void saveDraft(); });
+  bookingStartHour.addEventListener("change", () => { void saveDraft(); });
+  bookingEndHour.addEventListener("change", () => { void saveDraft(); });
 
   async function beginRun(type) {
     if (pending || run) return;
